@@ -277,6 +277,21 @@ namespace chainbase {
         }
 
         /**
+         * Set the next ID to be assigned on the next emplace() call.
+         * Used during snapshot import to preserve original object IDs.
+         */
+        void set_next_id(typename value_type::id_type id) {
+            _next_id = id;
+        }
+
+        /**
+         * Get the next ID that will be assigned on the next emplace() call.
+         */
+        typename value_type::id_type next_id() const {
+            return _next_id;
+        }
+
+        /**
          * Construct a new element in the multi_index_container.
          * Set the ID to the next available ID, then increment _next_id and fire off on_create().
          */
@@ -1241,4 +1256,3 @@ namespace chainbase {
     using shared_multi_index_container =
         boost::multi_index_container<Object, Args..., chainbase::allocator<Object>>;
 }  // namepsace chainbase
-
