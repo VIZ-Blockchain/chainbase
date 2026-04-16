@@ -25,7 +25,7 @@ if(WIN32)
     set(BOOST_ALL_DYN_LINK OFF) # force dynamic linking for all libraries
 endif(WIN32)
 
-find_package(Boost 1.57 REQUIRED COMPONENTS ${BOOST_COMPONENTS})
+find_package(Boost 1.71 REQUIRED COMPONENTS ${BOOST_COMPONENTS})
 
 if(APPLE)
     # Apple Specific Options Here
