@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <typeindex>
 #include <typeinfo>
+#include <utility>
 
 #ifndef CHAINBASE_NUM_RW_LOCKS
 #define CHAINBASE_NUM_RW_LOCKS 10
@@ -1171,7 +1172,7 @@ namespace chainbase {
 
         index_list_type::const_iterator index_list_end() const;
 
-        auto segment_manager() -> decltype(((boost::interprocess::managed_mapped_file *)nullptr)->get_segment_manager());
+        auto segment_manager() -> decltype(std::declval<boost::interprocess::managed_mapped_file>().get_segment_manager());
 
         void set_read_wait_micro(uint64_t value);
         uint64_t read_wait_micro() const;

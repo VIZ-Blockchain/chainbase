@@ -222,7 +222,7 @@ namespace chainbase {
     }
 
     auto database::segment_manager()
-        -> decltype(((boost::interprocess::managed_mapped_file *)nullptr)->get_segment_manager())
+        -> decltype(std::declval<boost::interprocess::managed_mapped_file>().get_segment_manager())
     {
         return _segment->get_segment_manager();
     }
@@ -276,5 +276,3 @@ namespace chainbase {
     }
 
 }  // namespace chainbase
-
-
