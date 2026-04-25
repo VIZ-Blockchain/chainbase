@@ -29,8 +29,10 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <typeindex>
 #include <typeinfo>
@@ -1067,12 +1069,72 @@ namespace chainbase {
             return get_mutable_index<index_type>().emplace(std::forward<Constructor>(con));
         }
 
+        /**
+         * RAII guard for operations that access shared memory.
+         * Participates in the resize barrier: constructor blocks while a resize
+         * is in progress, and destructor notifies the resize thread when the
+         * last operation completes.
+         */
+        class operation_guard {
+        public:
+            explicit operation_guard(database& db) : _db(db), _active(true) {
+                _db.enter_operation();
+            }
+
+            ~operation_guard() {
+                if (_active) {
+                    _db.exit_operation();
+                    _active = false;
+                }
+            }
+
+            // Explicitly release the guard early (before scope exit)
+            void release() {
+                if (_active) {
+                    _db.exit_operation();
+                    _active = false;
+                }
+            }
+
+            operation_guard(operation_guard&& other) noexcept
+                : _db(other._db), _active(other._active) {
+                other._active = false;
+            }
+
+            operation_guard(const operation_guard&) = delete;
+            operation_guard& operator=(const operation_guard&) = delete;
+            operation_guard& operator=(operation_guard&&) = delete;
+
+        private:
+            database& _db;
+            bool _active;
+        };
+
+        operation_guard make_operation_guard() {
+            return operation_guard(*this);
+        }
+
+        /**
+         * Begin the resize barrier: sets the resize-in-progress flag and waits
+         * for all active operations to drain to zero.  After this returns, no
+         * thread holds any reference into shared memory.
+         */
+        void begin_resize_barrier();
+
+        /**
+         * End the resize barrier: clears the resize-in-progress flag and wakes
+         * all threads waiting to enter an operation.
+         */
+        void end_resize_barrier();
+
         template<typename Lambda>
         auto with_read_lock(
             uint64_t read_wait_micro,
             uint32_t max_read_wait_retries,
             Lambda&& callback
         ) -> decltype((*(Lambda * )nullptr)()) {
+            operation_guard op_guard(*this);  // wait if resize in progress
+
             read_lock lock(_mutex, boost::defer_lock_t());
 #ifdef CHAINBASE_CHECK_LOCKING
             BOOST_ATTRIBUTE_UNUSED
@@ -1123,6 +1185,8 @@ namespace chainbase {
         ) -> decltype((*(Lambda * )nullptr)()) {
             if (_read_only)
                 BOOST_THROW_EXCEPTION(std::logic_error("cannot acquire write lock on read-only process"));
+
+            operation_guard op_guard(*this);  // wait if resize in progress
 
             write_lock lock(_mutex, boost::defer_lock_t());
 #ifdef CHAINBASE_CHECK_LOCKING
@@ -1251,6 +1315,15 @@ namespace chainbase {
         std::atomic<int32_t> _undo_session_count;
         size_t _file_size = 0;
         size_t _reserved_size = 0;
+
+        // Resize barrier: blocks all operations while shared memory is being remapped
+        std::atomic<bool> _resize_in_progress{false};
+        std::atomic<int32_t> _active_operations{0};
+        std::mutex _resize_barrier_mutex;
+        std::condition_variable _resize_barrier_cv;
+
+        void enter_operation();
+        void exit_operation();
     };
 
     template<typename Object, typename... Args>

@@ -275,4 +275,38 @@ namespace chainbase {
         return _reserved_size;
     }
 
+    void database::enter_operation() {
+        std::unique_lock<std::mutex> lock(_resize_barrier_mutex);
+        _resize_barrier_cv.wait(lock, [this]() {
+            return !_resize_in_progress.load(std::memory_order_acquire);
+        });
+        _active_operations.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    void database::exit_operation() {
+        auto prev = _active_operations.fetch_sub(1, std::memory_order_acq_rel);
+        if (prev == 1 && _resize_in_progress.load(std::memory_order_acquire)) {
+            // Last operation completed while resize is waiting - wake it up
+            std::lock_guard<std::mutex> lock(_resize_barrier_mutex);
+            _resize_barrier_cv.notify_all();
+        }
+    }
+
+    void database::begin_resize_barrier() {
+        std::unique_lock<std::mutex> lock(_resize_barrier_mutex);
+        _resize_in_progress.store(true, std::memory_order_release);
+        // Wait until all in-flight operations have completed
+        _resize_barrier_cv.wait(lock, [this]() {
+            return _active_operations.load(std::memory_order_acquire) == 0;
+        });
+    }
+
+    void database::end_resize_barrier() {
+        {
+            std::lock_guard<std::mutex> lock(_resize_barrier_mutex);
+            _resize_in_progress.store(false, std::memory_order_release);
+        }
+        _resize_barrier_cv.notify_all();
+    }
+
 }  // namespace chainbase
