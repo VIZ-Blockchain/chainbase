@@ -35,6 +35,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <typeindex>
 #include <typeinfo>
 #include <utility>
