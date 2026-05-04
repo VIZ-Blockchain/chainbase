@@ -33,6 +33,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <typeindex>
 #include <typeinfo>
@@ -1131,7 +1132,10 @@ namespace chainbase {
         auto with_read_lock(
             uint64_t read_wait_micro,
             uint32_t max_read_wait_retries,
-            Lambda&& callback
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
         ) -> decltype((*(Lambda * )nullptr)()) {
             operation_guard op_guard(*this);  // wait if resize in progress
 
@@ -1150,16 +1154,60 @@ namespace chainbase {
                         boost::posix_time::microseconds(read_wait_micro);
                 };
 
+                auto wait_start = boost::posix_time::microsec_clock::universal_time();
+
                 for (uint32_t retry = 0; ; ++retry) {
                     if (lock.timed_lock(lock_time())) {
                         break;
                     }
 
+                    auto now = boost::posix_time::microsec_clock::universal_time();
+                    uint64_t waited_ms = (now - wait_start).total_microseconds() / 1000;
+
+                    // Snapshot writer-holder info (atomic reads, best-effort)
+                    std::thread::id writer_tid = _write_lock_thread_id.load(std::memory_order_acquire);
+                    uint64_t writer_held_ms = 0;
+                    const char* writer_file = nullptr;
+                    int writer_line = 0;
+                    const char* writer_func = nullptr;
+                    if (writer_tid != std::thread::id()) {
+                        uint64_t acq_us = _write_lock_acquired_time_us.load(std::memory_order_acquire);
+                        if (acq_us > 0) {
+                            static const boost::posix_time::ptime epoch =
+                                boost::posix_time::from_time_t(0);
+                            auto acq_pt = epoch + boost::posix_time::microseconds(acq_us);
+                            writer_held_ms = (now - acq_pt).total_microseconds() / 1000;
+                        }
+                        writer_file = _write_lock_source_file.load(std::memory_order_acquire);
+                        writer_line = _write_lock_source_line.load(std::memory_order_acquire);
+                        writer_func = _write_lock_source_func.load(std::memory_order_acquire);
+                    }
+                    int32_t readers = _read_lock_count.load(std::memory_order_acquire);
+
+                    std::ostringstream diag;
+                    diag << "[lock=READ"
+                         << " waiter_tid=" << boost::this_thread::get_id()
+                         << " wait_ms=" << waited_ms;
+                    if (source_file && *source_file)
+                        diag << " waiter_at=" << source_file << ":" << source_line
+                             << " " << source_func;
+                    diag << " readers=" << readers;
+                    if (writer_tid != std::thread::id()) {
+                        diag << " writer_tid=" << writer_tid
+                             << " writer_held_ms=" << writer_held_ms;
+                        if (writer_file && *writer_file)
+                            diag << " writer_at=" << writer_file << ":"
+                                 << writer_line << " " << writer_func;
+                    }
+                    diag << "]";
+
                     if (retry >= max_read_wait_retries) {
-                        std::cerr << "No more retries for read lock" << std::endl;
-                        BOOST_THROW_EXCEPTION(std::runtime_error("Unable to acquire READ lock"));
+                        std::string diag_str = diag.str();
+                        std::cerr << "No more retries for read lock " << diag_str << std::endl;
+                        BOOST_THROW_EXCEPTION(std::runtime_error(
+                            std::string("Unable to acquire READ lock ") + diag_str));
                     } else {
-                        std::cerr << "Read lock timeout" << std::endl;
+                        std::cerr << "Read lock timeout " << diag.str() << std::endl;
                     }
                 }
             }
@@ -1168,20 +1216,37 @@ namespace chainbase {
         }
 
         template<typename Lambda>
-        auto with_weak_read_lock(Lambda&& callback) -> decltype((*(Lambda*)nullptr)()) {
-            return with_read_lock(_read_wait_micro, _max_read_wait_retries, std::forward<Lambda>(callback));
+        auto with_weak_read_lock(
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
+        ) -> decltype((*(Lambda*)nullptr)()) {
+            return with_read_lock(_read_wait_micro, _max_read_wait_retries,
+                                  std::forward<Lambda>(callback),
+                                  source_file, source_line, source_func);
         }
 
         template<typename Lambda>
-        auto with_strong_read_lock(Lambda&& callback) -> decltype((*(Lambda*)nullptr)()) {
-            return with_read_lock(uint64_t(1000000), uint32_t(100000), std::forward<Lambda>(callback));
+        auto with_strong_read_lock(
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
+        ) -> decltype((*(Lambda*)nullptr)()) {
+            return with_read_lock(uint64_t(1000000), uint32_t(100000),
+                                  std::forward<Lambda>(callback),
+                                  source_file, source_line, source_func);
         }
 
         template<typename Lambda>
         auto with_write_lock(
             uint64_t write_wait_micro,
             uint32_t max_write_wait_retries,
-            Lambda&& callback
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
         ) -> decltype((*(Lambda * )nullptr)()) {
             if (_read_only)
                 BOOST_THROW_EXCEPTION(std::logic_error("cannot acquire write lock on read-only process"));
@@ -1203,32 +1268,134 @@ namespace chainbase {
                         boost::posix_time::microseconds(write_wait_micro);
                 };
 
+                auto wait_start = boost::posix_time::microsec_clock::universal_time();
+
                 for (uint32_t retry = 0; ; ++retry) {
                     if (lock.timed_lock(lock_time())) {
                         break;
                     }
 
+                    auto now = boost::posix_time::microsec_clock::universal_time();
+                    uint64_t waited_ms = (now - wait_start).total_microseconds() / 1000;
+
+                    // Snapshot writer-holder info (atomic reads, best-effort)
+                    std::thread::id writer_tid = _write_lock_thread_id.load(std::memory_order_acquire);
+                    uint64_t writer_held_ms = 0;
+                    const char* writer_file = nullptr;
+                    int writer_line = 0;
+                    const char* writer_func = nullptr;
+                    if (writer_tid != std::thread::id()) {
+                        uint64_t acq_us = _write_lock_acquired_time_us.load(std::memory_order_acquire);
+                        if (acq_us > 0) {
+                            static const boost::posix_time::ptime epoch =
+                                boost::posix_time::from_time_t(0);
+                            auto acq_pt = epoch + boost::posix_time::microseconds(acq_us);
+                            writer_held_ms = (now - acq_pt).total_microseconds() / 1000;
+                        }
+                        writer_file = _write_lock_source_file.load(std::memory_order_acquire);
+                        writer_line = _write_lock_source_line.load(std::memory_order_acquire);
+                        writer_func = _write_lock_source_func.load(std::memory_order_acquire);
+                    }
+                    int32_t readers = _read_lock_count.load(std::memory_order_acquire);
+
+                    std::ostringstream diag;
+                    diag << "[lock=WRITE"
+                         << " waiter_tid=" << boost::this_thread::get_id()
+                         << " wait_ms=" << waited_ms;
+                    if (source_file && *source_file)
+                        diag << " waiter_at=" << source_file << ":" << source_line
+                             << " " << source_func;
+                    diag << " readers=" << readers;
+                    if (writer_tid != std::thread::id()) {
+                        diag << " writer_tid=" << writer_tid
+                             << " writer_held_ms=" << writer_held_ms;
+                        if (writer_file && *writer_file)
+                            diag << " writer_at=" << writer_file << ":"
+                                 << writer_line << " " << writer_func;
+                    }
+                    diag << "]";
+
                     if (retry >= max_write_wait_retries) {
-                        std::cerr << "FATAL write lock timeout!!!" << std::endl;
-                        BOOST_THROW_EXCEPTION(std::runtime_error("Unable to acquire WRITE lock"));
+                        std::string diag_str = diag.str();
+                        std::cerr << "FATAL write lock timeout!!! " << diag_str << std::endl;
+                        BOOST_THROW_EXCEPTION(std::runtime_error(
+                            std::string("Unable to acquire WRITE lock ") + diag_str));
                     } else {
-                        std::cerr << "Write lock timeout" << std::endl;
+                        std::cerr << "Write lock timeout " << diag.str() << std::endl;
                     }
                 }
             }
 
-            return callback();
+            // --- Record write-lock holder for diagnostics ---
+            {
+                auto now = boost::posix_time::microsec_clock::universal_time();
+                static const boost::posix_time::ptime epoch =
+                    boost::posix_time::from_time_t(0);
+                _write_lock_thread_id.store(boost::this_thread::get_id(),
+                                             std::memory_order_release);
+                _write_lock_acquired_time_us.store(
+                    (now - epoch).total_microseconds(), std::memory_order_release);
+                _write_lock_source_file.store(source_file, std::memory_order_release);
+                _write_lock_source_line.store(source_line, std::memory_order_release);
+                _write_lock_source_func.store(source_func, std::memory_order_release);
+            }
+
+            // RAII guard: clear holder info on scope exit / exception unwind
+            struct write_lock_holder_guard {
+                database& _db;
+                ~write_lock_holder_guard() {
+                    _db._write_lock_thread_id.store(std::thread::id(),
+                                                     std::memory_order_release);
+                    _db._write_lock_acquired_time_us.store(0,
+                                                            std::memory_order_release);
+                }
+            } holder_guard{*this};
+
+            try {
+                return callback();
+            } catch (...) {
+                // guard clears holder info on unwind
+                throw;
+            }
         }
 
         template<typename Lambda>
-        auto with_weak_write_lock(Lambda&& callback) -> decltype((*(Lambda*)nullptr)()) {
-            return with_write_lock(_write_wait_micro, _max_write_wait_retries, std::forward<Lambda>(callback));
+        auto with_weak_write_lock(
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
+        ) -> decltype((*(Lambda*)nullptr)()) {
+            return with_write_lock(_write_wait_micro, _max_write_wait_retries,
+                                   std::forward<Lambda>(callback),
+                                   source_file, source_line, source_func);
         }
 
         template<typename Lambda>
-        auto with_strong_write_lock(Lambda&& callback) -> decltype((*(Lambda*)nullptr)()) {
-            return with_write_lock(uint64_t(1000000), uint32_t(100000), std::forward<Lambda>(callback));
+        auto with_strong_write_lock(
+            Lambda&& callback,
+            const char* source_file = "",
+            int source_line = 0,
+            const char* source_func = ""
+        ) -> decltype((*(Lambda*)nullptr)()) {
+            return with_write_lock(uint64_t(1000000), uint32_t(100000),
+                                   std::forward<Lambda>(callback),
+                                   source_file, source_line, source_func);
         }
+
+        // ---- Convenience macros for automatic source-location capture ----
+        // Usage: CHAINBASE_WITH_WEAK_READ_LOCK(db, [&]{ ... });
+#define CHAINBASE_WITH_WEAK_READ_LOCK(db, callback) \
+    (db).with_weak_read_lock(callback, __FILE__, __LINE__, __func__)
+
+#define CHAINBASE_WITH_STRONG_READ_LOCK(db, callback) \
+    (db).with_strong_read_lock(callback, __FILE__, __LINE__, __func__)
+
+#define CHAINBASE_WITH_WEAK_WRITE_LOCK(db, callback) \
+    (db).with_weak_write_lock(callback, __FILE__, __LINE__, __func__)
+
+#define CHAINBASE_WITH_STRONG_WRITE_LOCK(db, callback) \
+    (db).with_strong_write_lock(callback, __FILE__, __LINE__, __func__)
 
         std::size_t index_list_size() const;
 
@@ -1305,6 +1472,17 @@ namespace chainbase {
         std::atomic<int32_t> _read_lock_count;
         std::atomic<int32_t> _write_lock_count;
         bool _enable_require_locking = false;
+
+        // --- Lock-holder tracking for timeout diagnostics ---
+        // Write lock holder info (readers are counted via _read_lock_count).
+        // Written by the thread that successfully acquires the write lock;
+        // cleared by RAII guard on release.  Read by any thread that times
+        // out waiting to acquire.
+        std::atomic<std::thread::id> _write_lock_thread_id;
+        std::atomic<uint64_t>         _write_lock_acquired_time_us{0};
+        mutable std::atomic<const char*> _write_lock_source_file{nullptr};
+        mutable std::atomic<int>         _write_lock_source_line{0};
+        mutable std::atomic<const char*> _write_lock_source_func{nullptr};
 
         uint64_t _read_wait_micro = 500000;
         uint32_t _max_read_wait_retries = 3;
