@@ -1395,17 +1395,20 @@ namespace chainbase {
         // __FILE__, __LINE__, __func__ are captured at every call site.
         // All existing code calling with_weak_read_lock(callback) etc.
         // automatically gets source-location tracking without any changes.
-#define with_weak_read_lock(cb) \
-    with_weak_read_lock_impl(cb, __FILE__, __LINE__, __func__)
+        // Variadic macros are required because lambda bodies may contain
+        // commas (template args, function args) that would otherwise be
+        // interpreted as macro argument separators.
+#define with_weak_read_lock(...) \
+    with_weak_read_lock_impl(__VA_ARGS__, __FILE__, __LINE__, __func__)
 
-#define with_strong_read_lock(cb) \
-    with_strong_read_lock_impl(cb, __FILE__, __LINE__, __func__)
+#define with_strong_read_lock(...) \
+    with_strong_read_lock_impl(__VA_ARGS__, __FILE__, __LINE__, __func__)
 
-#define with_weak_write_lock(cb) \
-    with_weak_write_lock_impl(cb, __FILE__, __LINE__, __func__)
+#define with_weak_write_lock(...) \
+    with_weak_write_lock_impl(__VA_ARGS__, __FILE__, __LINE__, __func__)
 
-#define with_strong_write_lock(cb) \
-    with_strong_write_lock_impl(cb, __FILE__, __LINE__, __func__)
+#define with_strong_write_lock(...) \
+    with_strong_write_lock_impl(__VA_ARGS__, __FILE__, __LINE__, __func__)
 
         std::size_t index_list_size() const;
 
