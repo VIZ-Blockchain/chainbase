@@ -1187,7 +1187,7 @@ namespace chainbase {
 
                     std::ostringstream diag;
                     diag << "[lock=READ"
-                         << " waiter_tid=" << boost::this_thread::get_id()
+                         << " waiter_tid=" << std::this_thread::get_id()
                          << " wait_ms=" << waited_ms;
                     if (source_file && *source_file)
                         diag << " waiter_at=" << source_file << ":" << source_line
@@ -1301,7 +1301,7 @@ namespace chainbase {
 
                     std::ostringstream diag;
                     diag << "[lock=WRITE"
-                         << " waiter_tid=" << boost::this_thread::get_id()
+                         << " waiter_tid=" << std::this_thread::get_id()
                          << " wait_ms=" << waited_ms;
                     if (source_file && *source_file)
                         diag << " waiter_at=" << source_file << ":" << source_line
@@ -1332,7 +1332,7 @@ namespace chainbase {
                 auto now = boost::posix_time::microsec_clock::universal_time();
                 static const boost::posix_time::ptime epoch =
                     boost::posix_time::from_time_t(0);
-                _write_lock_thread_id.store(boost::this_thread::get_id(),
+                _write_lock_thread_id.store(std::this_thread::get_id(),
                                              std::memory_order_release);
                 _write_lock_acquired_time_us.store(
                     (now - epoch).total_microseconds(), std::memory_order_release);
