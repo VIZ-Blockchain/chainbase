@@ -1217,11 +1217,11 @@ namespace chainbase {
         }
 
         template<typename Lambda>
-        auto with_weak_read_lock(
+        auto with_weak_read_lock_impl(
             Lambda&& callback,
-            const char* source_file = "",
-            int source_line = 0,
-            const char* source_func = ""
+            const char* source_file,
+            int source_line,
+            const char* source_func
         ) -> decltype((*(Lambda*)nullptr)()) {
             return with_read_lock(_read_wait_micro, _max_read_wait_retries,
                                   std::forward<Lambda>(callback),
@@ -1229,11 +1229,11 @@ namespace chainbase {
         }
 
         template<typename Lambda>
-        auto with_strong_read_lock(
+        auto with_strong_read_lock_impl(
             Lambda&& callback,
-            const char* source_file = "",
-            int source_line = 0,
-            const char* source_func = ""
+            const char* source_file,
+            int source_line,
+            const char* source_func
         ) -> decltype((*(Lambda*)nullptr)()) {
             return with_read_lock(uint64_t(1000000), uint32_t(100000),
                                   std::forward<Lambda>(callback),
@@ -1349,6 +1349,12 @@ namespace chainbase {
                                                      std::memory_order_release);
                     _db._write_lock_acquired_time_us.store(0,
                                                             std::memory_order_release);
+                    _db._write_lock_source_file.store(nullptr,
+                                                       std::memory_order_release);
+                    _db._write_lock_source_line.store(0,
+                                                       std::memory_order_release);
+                    _db._write_lock_source_func.store(nullptr,
+                                                       std::memory_order_release);
                 }
             } holder_guard{*this};
 
@@ -1361,11 +1367,11 @@ namespace chainbase {
         }
 
         template<typename Lambda>
-        auto with_weak_write_lock(
+        auto with_weak_write_lock_impl(
             Lambda&& callback,
-            const char* source_file = "",
-            int source_line = 0,
-            const char* source_func = ""
+            const char* source_file,
+            int source_line,
+            const char* source_func
         ) -> decltype((*(Lambda*)nullptr)()) {
             return with_write_lock(_write_wait_micro, _max_write_wait_retries,
                                    std::forward<Lambda>(callback),
@@ -1373,30 +1379,33 @@ namespace chainbase {
         }
 
         template<typename Lambda>
-        auto with_strong_write_lock(
+        auto with_strong_write_lock_impl(
             Lambda&& callback,
-            const char* source_file = "",
-            int source_line = 0,
-            const char* source_func = ""
+            const char* source_file,
+            int source_line,
+            const char* source_func
         ) -> decltype((*(Lambda*)nullptr)()) {
             return with_write_lock(uint64_t(1000000), uint32_t(100000),
                                    std::forward<Lambda>(callback),
                                    source_file, source_line, source_func);
         }
 
-        // ---- Convenience macros for automatic source-location capture ----
-        // Usage: CHAINBASE_WITH_WEAK_READ_LOCK(db, [&]{ ... });
-#define CHAINBASE_WITH_WEAK_READ_LOCK(db, callback) \
-    (db).with_weak_read_lock(callback, __FILE__, __LINE__, __func__)
+        // ---- Auto-capturing macros for source-location diagnostics ----
+        // These macros replace direct calls to the _impl methods so that
+        // __FILE__, __LINE__, __func__ are captured at every call site.
+        // All existing code calling with_weak_read_lock(callback) etc.
+        // automatically gets source-location tracking without any changes.
+#define with_weak_read_lock(cb) \
+    with_weak_read_lock_impl(cb, __FILE__, __LINE__, __func__)
 
-#define CHAINBASE_WITH_STRONG_READ_LOCK(db, callback) \
-    (db).with_strong_read_lock(callback, __FILE__, __LINE__, __func__)
+#define with_strong_read_lock(cb) \
+    with_strong_read_lock_impl(cb, __FILE__, __LINE__, __func__)
 
-#define CHAINBASE_WITH_WEAK_WRITE_LOCK(db, callback) \
-    (db).with_weak_write_lock(callback, __FILE__, __LINE__, __func__)
+#define with_weak_write_lock(cb) \
+    with_weak_write_lock_impl(cb, __FILE__, __LINE__, __func__)
 
-#define CHAINBASE_WITH_STRONG_WRITE_LOCK(db, callback) \
-    (db).with_strong_write_lock(callback, __FILE__, __LINE__, __func__)
+#define with_strong_write_lock(cb) \
+    with_strong_write_lock_impl(cb, __FILE__, __LINE__, __func__)
 
         std::size_t index_list_size() const;
 
