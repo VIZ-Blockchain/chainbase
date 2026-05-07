@@ -9,7 +9,12 @@ namespace chainbase {
     struct environment_check {
         environment_check() {
             memset(&compiler_version, 0, sizeof(compiler_version));
+#if defined(_MSC_VER)
+            const char* ver = "MSVC " _CRT_STRINGIZE(_MSC_VER);
+            memcpy(&compiler_version, ver, std::min<size_t>(strlen(ver), 256));
+#else
             memcpy(&compiler_version, __VERSION__, std::min<size_t>(strlen(__VERSION__), 256));
+#endif
 #ifndef NDEBUG
             debug = true;
 #endif
@@ -42,7 +47,7 @@ namespace chainbase {
 
         if (!boost::filesystem::exists(dir)) {
             if (!write) {
-                BOOST_THROW_EXCEPTION(std::runtime_error("database file not found at " + dir.native()));
+                BOOST_THROW_EXCEPTION(std::runtime_error(std::string("database file not found at ") + dir.string()));
             }
         }
 
