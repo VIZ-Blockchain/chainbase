@@ -914,7 +914,9 @@ namespace chainbase {
                 // undo() may throw when writing to full shared memory.
                 // Throwing from a destructor during stack unwinding causes
                 // std::terminate.  Catch and suppress to prevent this.
-                if (std::uncaught_exceptions() > 0) {
+                // Note: uses uncaught_exception() (singular) for C++11/14
+                // compatibility. uncaught_exceptions() (plural) is C++17+.
+                if (std::uncaught_exception()) {
                     try {
                         undo();
                     } catch (const std::exception& e) {
