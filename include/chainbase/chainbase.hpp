@@ -30,6 +30,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -908,7 +909,27 @@ namespace chainbase {
             }
 
             ~session() {
-                undo();
+                // Safety net: if we're being destroyed during exception
+                // unwinding (e.g., bad_alloc from shared memory exhaustion),
+                // undo() may throw when writing to full shared memory.
+                // Throwing from a destructor during stack unwinding causes
+                // std::terminate.  Catch and suppress to prevent this.
+                if (std::uncaught_exceptions() > 0) {
+                    try {
+                        undo();
+                    } catch (const std::exception& e) {
+                        std::cerr << "chainbase: session undo() failed during "
+                                  << "exception unwinding: " << e.what()
+                                  << " (suppressed to prevent terminate)"
+                                  << std::endl;
+                    } catch (...) {
+                        std::cerr << "chainbase: session undo() threw unknown "
+                                  << "exception during unwinding (suppressed)"
+                                  << std::endl;
+                    }
+                } else {
+                    undo();
+                }
             }
 
             void push() {

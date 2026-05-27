@@ -1,6 +1,7 @@
 #include <chainbase/chainbase.hpp>
 #include <boost/array.hpp>
 
+#include <fstream>
 #include <iostream>
 
 namespace chainbase {
@@ -74,6 +75,19 @@ namespace chainbase {
                 _segment.reset(new boost::interprocess::managed_mapped_file(boost::interprocess::open_only,
                     abs_path.generic_string().c_str()
                 ));
+
+                // Post-grow validation: verify the segment's actual size
+                // matches what we expect.  A mismatch means grow() extended
+                // the file on disk but the managed_mapped_file metadata
+                // wasn't updated (possible after a crash during a previous
+                // resize cycle).
+                auto actual_size = _segment->get_size();
+                if (actual_size < _file_size) {
+                    std::cerr << "WARNING: shared memory segment size (" << actual_size
+                              << ") is smaller than expected (" << _file_size
+                              << "). File may be corrupted from a previous incomplete resize."
+                              << std::endl;
+                }
             } else {
                 _segment.reset(new boost::interprocess::managed_mapped_file(boost::interprocess::open_read_only,
                     abs_path.generic_string().c_str()
@@ -99,6 +113,21 @@ namespace chainbase {
             if (!_flock.try_lock()) {
                 BOOST_THROW_EXCEPTION(std::runtime_error("could not gain write access to the shared memory file"));
             }
+
+            // Detect incomplete resize from a previous crash.
+            // resize() writes this marker before the destructive grow/remap
+            // and removes it after success.  If it survives, the shared
+            // memory file may be in an inconsistent state.
+            auto resize_marker = dir / "resize_in_progress";
+            if (boost::filesystem::exists(resize_marker)) {
+                std::cerr << "WARNING: resize_in_progress marker found at "
+                          << resize_marker.string()
+                          << ". Previous resize may have been interrupted. "
+                          << "Shared memory may be corrupted."
+                          << std::endl;
+                // Don't throw here — let the caller (graphene::database::open)
+                // decide whether to trigger recovery or continue.
+            }
         }
     }
 
@@ -121,6 +150,9 @@ namespace chainbase {
     void database::wipe(const boost::filesystem::path& dir) {
         _segment.reset();
         boost::filesystem::remove_all(dir / "shared_memory.bin");
+        // Clean up crash markers
+        boost::system::error_code ec;
+        boost::filesystem::remove(dir / "resize_in_progress", ec);
         _data_dir = boost::filesystem::path();
         _index_list.clear();
         _index_map.clear();
@@ -137,9 +169,31 @@ namespace chainbase {
             BOOST_THROW_EXCEPTION(std::runtime_error("Cannot resize shared memory file while undo session is active"));
         }
 
+        // Crash guard: write marker BEFORE any destructive operation.
+        // If the process crashes during grow/remap, the marker survives
+        // and triggers recovery on next startup.
+        auto resize_marker = _data_dir / "resize_in_progress";
+        { std::ofstream f(resize_marker.string()); f << new_shared_file_size; }
+
+        // CRITICAL: Flush all dirty pages to disk before destroying the
+        // mapping.  Without this, the OS may still have unwritten data
+        // in the page cache; if grow() or the subsequent open() fails,
+        // the on-disk file would be stale/inconsistent.
+        _segment->flush();
+
         _segment.reset();
 
-        open(_data_dir, database::read_write, new_shared_file_size);
+        try {
+            open(_data_dir, database::read_write, new_shared_file_size);
+        } catch (...) {
+            // open() failed after the file may have been grown.
+            // Leave the crash marker in place so the next startup
+            // detects the incomplete resize and triggers recovery.
+            std::cerr << "FATAL: shared memory resize failed. "
+                      << "Crash marker left at " << resize_marker.string()
+                      << " — restart will trigger recovery." << std::endl;
+            throw;
+        }
 
         _index_list.clear();
         _index_map.clear();
@@ -147,6 +201,10 @@ namespace chainbase {
         for (auto& index_type: _index_types) {
             index_type->add_index(*this);
         }
+
+        // Resize completed successfully — remove the crash marker.
+        boost::system::error_code ec;
+        boost::filesystem::remove(resize_marker, ec);
     }
 
     void database::set_require_locking(bool enable_require_locking) {
