@@ -246,6 +246,10 @@ namespace chainbase {
     void database::undo_all() {
         for (auto& item : _index_list) {
             item->undo_all();
+            // Liveness signal for an external stall watchdog (see
+            // graphene::chain::database::open): a corrupted index can make
+            // undo() spin forever, freezing this loop with no progress.
+            _undo_all_progress.fetch_add(1, std::memory_order_relaxed);
         }
     }
 

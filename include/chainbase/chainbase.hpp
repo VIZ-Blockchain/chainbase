@@ -909,28 +909,27 @@ namespace chainbase {
             }
 
             ~session() {
-                // Safety net: if we're being destroyed during exception
-                // unwinding (e.g., bad_alloc from shared memory exhaustion),
-                // undo() may throw when writing to full shared memory.
-                // Throwing from a destructor during stack unwinding causes
-                // std::terminate.  Catch and suppress to prevent this.
-                // Note: uses uncaught_exception() (singular) for C++11/14
-                // compatibility. uncaught_exceptions() (plural) is C++17+.
-                if (std::uncaught_exception()) {
-                    try {
-                        undo();
-                    } catch (const std::exception& e) {
-                        std::cerr << "chainbase: session undo() failed during "
-                                  << "exception unwinding: " << e.what()
-                                  << " (suppressed to prevent terminate)"
-                                  << std::endl;
-                    } catch (...) {
-                        std::cerr << "chainbase: session undo() threw unknown "
-                                  << "exception during unwinding (suppressed)"
-                                  << std::endl;
-                    }
-                } else {
+                // A destructor is implicitly noexcept, so ANY exception that
+                // escapes it calls std::terminate — not only one thrown while
+                // another exception is already unwinding.  undo() walks the
+                // shared-memory indices and can throw: bad_alloc when the
+                // segment is full, or std::logic_error ("Could not modify
+                // object") when the segment is corrupted.  The latter aborted
+                // a node mid auto-recovery (close() -> clear_pending() resets
+                // the pending session here).  So ALWAYS run undo() under a
+                // catch, never bare.  Suppressing is safe: a failed revert only
+                // matters during corruption recovery, which wipes and rebuilds
+                // the segment from a snapshot immediately afterwards.
+                try {
                     undo();
+                } catch (const std::exception& e) {
+                    std::cerr << "chainbase: session undo() failed in destructor: "
+                              << e.what() << " (suppressed to prevent terminate)"
+                              << std::endl;
+                } catch (...) {
+                    std::cerr << "chainbase: session undo() threw unknown exception "
+                              << "in destructor (suppressed to prevent terminate)"
+                              << std::endl;
                 }
             }
 
@@ -978,6 +977,14 @@ namespace chainbase {
         void commit(int64_t revision);
 
         void undo_all();
+
+        /** Monotonic counter, bumped once per index unwound by undo_all().
+         *  Lets an external watchdog detect a stalled (infinite-looping)
+         *  undo over a corrupted segment: if this stops advancing while
+         *  undo_all() runs, the segment is corrupt. */
+        uint64_t undo_all_progress() const {
+            return _undo_all_progress.load(std::memory_order_acquire);
+        }
 
         int64_t revision() const;
 
@@ -1535,6 +1542,9 @@ namespace chainbase {
         std::atomic<int32_t> _active_operations{0};
         std::mutex _resize_barrier_mutex;
         std::condition_variable _resize_barrier_cv;
+
+        // Liveness counter for undo_all() — see undo_all_progress().
+        std::atomic<uint64_t> _undo_all_progress{0};
 
         void enter_operation();
         void exit_operation();
