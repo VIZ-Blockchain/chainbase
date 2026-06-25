@@ -1008,6 +1008,25 @@ namespace chainbase {
             return held_ms > 0 ? static_cast<uint64_t>(held_ms) : 0;
         }
 
+        /** Best-effort, lock-free description of the current write-lock holder:
+         *  "<file>:<line> <func> tid=<id>", or "<none>" if the lock is free.
+         *  The source pointers are string literals captured at the lock site
+         *  (__FILE__ / __func__), valid for the process lifetime, so reading
+         *  them without the lock is safe.  Lets the deadlock watchdog name the
+         *  exact wedged call site (e.g. "database.cpp:1688 _push_block"). */
+        std::string write_lock_holder_diag() const {
+            std::thread::id tid = _write_lock_thread_id.load(std::memory_order_acquire);
+            if (tid == std::thread::id())
+                return "<none>";
+            const char* file = _write_lock_source_file.load(std::memory_order_acquire);
+            int         line = _write_lock_source_line.load(std::memory_order_acquire);
+            const char* func = _write_lock_source_func.load(std::memory_order_acquire);
+            std::ostringstream os;
+            os << (file ? file : "?") << ":" << line << " " << (func ? func : "?")
+               << " tid=" << tid;
+            return os.str();
+        }
+
         /** True while a deliberately long write operation (snapshot import,
          *  dlt reindex / blockchain replay) holds the write lock.  A deadlock
          *  watchdog must ignore write_lock_held_ms() while this is set so it
