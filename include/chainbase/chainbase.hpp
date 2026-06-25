@@ -986,6 +986,53 @@ namespace chainbase {
             return _undo_all_progress.load(std::memory_order_acquire);
         }
 
+        /** Milliseconds the write lock has been continuously held by its
+         *  current owner, or 0 if no writer holds it right now.  Lock-free
+         *  (atomic reads only), so a watchdog thread can poll it without ever
+         *  touching the lock it is monitoring.  A wedged writer — e.g. a
+         *  push_block fork-switch whose chainbase undo() failed and was
+         *  suppressed — keeps this growing without bound while every reader
+         *  starves.  Pair with expected_long_write() to tell that apart from a
+         *  legitimately long write (snapshot import, reindex/replay). */
+        uint64_t write_lock_held_ms() const {
+            if (_write_lock_thread_id.load(std::memory_order_acquire) == std::thread::id())
+                return 0;
+            uint64_t acq_us = _write_lock_acquired_time_us.load(std::memory_order_acquire);
+            if (acq_us == 0)
+                return 0;
+            static const boost::posix_time::ptime epoch =
+                boost::posix_time::from_time_t(0);
+            auto now = boost::posix_time::microsec_clock::universal_time();
+            auto acq_pt = epoch + boost::posix_time::microseconds(acq_us);
+            int64_t held_ms = (now - acq_pt).total_microseconds() / 1000;
+            return held_ms > 0 ? static_cast<uint64_t>(held_ms) : 0;
+        }
+
+        /** True while a deliberately long write operation (snapshot import,
+         *  dlt reindex / blockchain replay) holds the write lock.  A deadlock
+         *  watchdog must ignore write_lock_held_ms() while this is set so it
+         *  never mistakes a slow-but-healthy maintenance write for a wedge.
+         *  Scope it with expected_long_write_guard. */
+        bool expected_long_write() const {
+            return _expected_long_write.load(std::memory_order_acquire) != 0;
+        }
+
+        /** RAII marker for an expected long write.  Re-entrant (counter), so
+         *  nested guards compose safely.  Set it around the write operation,
+         *  not just inside the lock callback, so the marker is already up the
+         *  instant the lock is acquired. */
+        struct expected_long_write_guard {
+            database& _db;
+            explicit expected_long_write_guard(database& db) : _db(db) {
+                _db._expected_long_write.fetch_add(1, std::memory_order_acq_rel);
+            }
+            ~expected_long_write_guard() {
+                _db._expected_long_write.fetch_sub(1, std::memory_order_acq_rel);
+            }
+            expected_long_write_guard(const expected_long_write_guard&) = delete;
+            expected_long_write_guard& operator=(const expected_long_write_guard&) = delete;
+        };
+
         int64_t revision() const;
 
         void set_revision(uint64_t revision);
@@ -1545,6 +1592,12 @@ namespace chainbase {
 
         // Liveness counter for undo_all() — see undo_all_progress().
         std::atomic<uint64_t> _undo_all_progress{0};
+
+        // Nonzero while a deliberately long write operation holds the lock
+        // (snapshot import, reindex/replay).  The write-lock deadlock watchdog
+        // ignores write_lock_held_ms() while this is set.  See
+        // expected_long_write() / expected_long_write_guard.
+        std::atomic<int32_t> _expected_long_write{0};
 
         void enter_operation();
         void exit_operation();
