@@ -1,8 +1,11 @@
 #include <chainbase/chainbase.hpp>
 #include <boost/array.hpp>
+#include <boost/version.hpp>
 
+#include <cctype>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 namespace chainbase {
 
@@ -10,12 +13,21 @@ namespace chainbase {
     struct environment_check {
         environment_check() {
             memset(&compiler_version, 0, sizeof(compiler_version));
+            // The Boost version rides inside the existing fixed-size buffer
+            // rather than as a new field: this struct is persisted inside the
+            // segment, so changing its layout would break the very check it
+            // performs.  Boost.Interprocess's segment layout is not guaranteed
+            // stable across Boost versions, so a mismatch must be refused.
 #if defined(_MSC_VER)
-            const char* ver = "MSVC " _CRT_STRINGIZE(_MSC_VER);
-            memcpy(&compiler_version, ver, std::min<size_t>(strlen(ver), 256));
+            std::string ver = std::string("MSVC ") + _CRT_STRINGIZE(_MSC_VER);
 #else
-            memcpy(&compiler_version, __VERSION__, std::min<size_t>(strlen(__VERSION__), 256));
+            std::string ver = __VERSION__;
 #endif
+            ver += " boost-";
+            ver += BOOST_LIB_VERSION;
+            // 255, not 256: the buffer must stay NUL-terminated so the
+            // mismatch message below can read it back as a C string.
+            memcpy(&compiler_version, ver.c_str(), std::min<size_t>(ver.size(), 255));
 #ifndef NDEBUG
             debug = true;
 #endif
@@ -38,6 +50,47 @@ namespace chainbase {
         bool apple = false;
         bool windows = false;
     };
+
+    namespace {
+        /// Recover the environment stamp straight out of the segment's bytes.
+        ///
+        /// When the state was written by a *different Boost*, the named-object
+        /// index is itself unreadable, so find<environment_check>("environment")
+        /// returns null and we cannot report what the state was built with --
+        /// precisely the case the stamp exists to explain.  The struct is
+        /// allocated at the head of the segment, so the string is recoverable by
+        /// scanning the first few KiB for the "boost-" marker and taking the
+        /// surrounding NUL-terminated run.  Returns empty if not found, which
+        /// includes state written before the stamp existed.
+        std::string scan_environment_stamp(const boost::filesystem::path& segment_file) {
+            std::ifstream in(segment_file.string().c_str(), std::ios::binary);
+            if (!in) {
+                return std::string();
+            }
+
+            char head[4096];
+            memset(head, 0, sizeof(head));
+            in.read(head, sizeof(head));
+            const size_t got = static_cast<size_t>(in.gcount());
+
+            const std::string haystack(head, got);
+            const size_t marker = haystack.find("boost-");
+            if (marker == std::string::npos) {
+                return std::string();
+            }
+
+            // Walk back to the start of the printable run, forward to its end.
+            size_t begin = marker;
+            while (begin > 0 && isprint(static_cast<unsigned char>(haystack[begin - 1]))) {
+                --begin;
+            }
+            size_t end = marker;
+            while (end < got && isprint(static_cast<unsigned char>(haystack[end]))) {
+                ++end;
+            }
+            return haystack.substr(begin, end - begin);
+        }
+    }
 
     void database::open(const boost::filesystem::path& dir, uint32_t flags, size_t shared_file_size) {
         _read_lock_count.store(0);
@@ -98,7 +151,21 @@ namespace chainbase {
 
             auto env = _segment->find<environment_check>("environment");
             if (!env.first || !(*env.first == environment_check())) {
-                BOOST_THROW_EXCEPTION(std::runtime_error("database created by a different compiler, build, or operating system"));
+                std::string stored;
+                if (env.first) {
+                    stored = std::string(env.first->compiler_version.data());
+                } else {
+                    stored = scan_environment_stamp(abs_path);
+                    if (stored.empty()) {
+                        stored = "<unreadable -- predates this check, or a Boost too different to parse>";
+                    }
+                }
+                std::string current(environment_check().compiler_version.data());
+                BOOST_THROW_EXCEPTION(std::runtime_error(
+                    "database was created by a different compiler, build, or operating system.\n"
+                    "  state was built with: " + stored + "\n"
+                    "  this binary uses:     " + current + "\n"
+                    "Replay from the block log or import a snapshot to rebuild state."));
             }
         } else {
             _segment.reset(new boost::interprocess::managed_mapped_file(boost::interprocess::create_only,

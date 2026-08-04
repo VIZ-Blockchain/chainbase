@@ -7,8 +7,11 @@
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/member.hpp>
+#include <boost/version.hpp>
 
+#include <fstream>
 #include <iostream>
+#include <iterator>
 
 using namespace chainbase;
 using namespace boost::multi_index;
@@ -132,6 +135,29 @@ BOOST_AUTO_TEST_CASE(open_and_create) {
 
         BOOST_REQUIRE_EQUAL(new_book.a, copy_new_book.a);
         BOOST_REQUIRE_EQUAL(new_book.b, copy_new_book.b);
+    } catch (...) {
+        boost::filesystem::remove_all(temp);
+        throw;
+    }
+}
+
+BOOST_AUTO_TEST_CASE(environment_check_encodes_boost_version) {
+    boost::filesystem::path temp = boost::filesystem::unique_path();
+    try {
+        {
+            chainbase::database db;
+            db.open(temp, chainbase::database::read_write, 1024 * 1024);
+            db.close();
+        }
+
+        // The environment string persisted in the segment must name the Boost
+        // version, so that a node built against a different Boost refuses the
+        // state directory instead of mapping a possibly-reshaped segment.
+        std::ifstream in((temp / "shared_memory.bin").string(), std::ios::binary);
+        std::string blob((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        BOOST_REQUIRE(blob.find(std::string("boost-") + BOOST_LIB_VERSION) != std::string::npos);
+
+        boost::filesystem::remove_all(temp);
     } catch (...) {
         boost::filesystem::remove_all(temp);
         throw;
