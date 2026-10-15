@@ -30,6 +30,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -54,6 +55,15 @@
 #endif
 
 namespace chainbase {
+
+    namespace detail {
+        inline void report_failed_session_undo() noexcept {
+            // Avoid C++ stream sentries: a unitbuf flush can terminate inside
+            // their destructor even when the insertion is wrapped in a catch.
+            std::fputs("chainbase: session undo() failed in destructor; "
+                       "rollback is incomplete (exception suppressed)\n", stderr);
+        }
+    }
 
     template<typename T>
     using allocator = boost::interprocess::allocator<T, boost::interprocess::managed_mapped_file::segment_manager>;
@@ -369,13 +379,15 @@ namespace chainbase {
 
         class session {
         public:
-            session(session&& mv) : _index(mv._index), _apply(mv._apply) {
+            session(session&& mv) : _index(mv._index), _apply(mv._apply), _revision(mv._revision) {
                 mv._apply = false;
             }
 
-            ~session() {
-                if (_apply) {
-                    _index.undo();
+            ~session() noexcept {
+                try {
+                    undo();
+                } catch (...) {
+                    detail::report_failed_session_undo();
                 }
             }
 
@@ -387,26 +399,38 @@ namespace chainbase {
             /** combines this session with the prior session */
             void squash() {
                 if (_apply) {
-                    _index.squash();
+                    // A partial merge can already have changed the parent undo
+                    // state. Leave the inner revision in place on failure so
+                    // outer session cleanup cannot replay inconsistent history.
+                    _apply = false;
+                    _index->squash();
                 }
-                _apply = false;
             }
 
             void undo() {
                 if (_apply) {
-                    _index.undo();
+                    // undo() can mutate the index before throwing. Never retry
+                    // that partially applied rollback, including in destruction.
+                    _apply = false;
+                    // An inner failed undo leaves its revision on the stack.
+                    // Never let an outer session replay that partially applied
+                    // revision while unwinding. Do not change mapped state layout.
+                    if (_index->revision() != _revision) {
+                        BOOST_THROW_EXCEPTION(std::logic_error(
+                            "Cannot undo session: a different revision remains on the undo stack"));
+                    }
+                    _index->undo();
                 }
-                _apply = false;
             }
 
             session& operator=(session&& mv) {
                 if (this == &mv) {
                     return *this;
                 }
-                if (_apply) {
-                    _index.undo();
-                }
+                undo();
+                _index = mv._index;
                 _apply = mv._apply;
+                _revision = mv._revision;
                 mv._apply = false;
                 return *this;
             }
@@ -418,13 +442,13 @@ namespace chainbase {
         private:
             friend class generic_index;
 
-            session(generic_index& idx, int64_t revision) : _index(idx), _revision(revision) {
+            session(generic_index& idx, int64_t revision) : _index(&idx), _revision(revision) {
                 if (revision == -1) {
                     _apply = false;
                 }
             }
 
-            generic_index& _index;
+            generic_index* _index;
             bool _apply = true;
             int64_t _revision = 0;
         };
@@ -908,28 +932,11 @@ namespace chainbase {
                 }
             }
 
-            ~session() {
-                // A destructor is implicitly noexcept, so ANY exception that
-                // escapes it calls std::terminate — not only one thrown while
-                // another exception is already unwinding.  undo() walks the
-                // shared-memory indices and can throw: bad_alloc when the
-                // segment is full, or std::logic_error ("Could not modify
-                // object") when the segment is corrupted.  The latter aborted
-                // a node mid auto-recovery (close() -> clear_pending() resets
-                // the pending session here).  So ALWAYS run undo() under a
-                // catch, never bare.  Suppressing is safe: a failed revert only
-                // matters during corruption recovery, which wipes and rebuilds
-                // the segment from a snapshot immediately afterwards.
+            ~session() noexcept {
                 try {
                     undo();
-                } catch (const std::exception& e) {
-                    std::cerr << "chainbase: session undo() failed in destructor: "
-                              << e.what() << " (suppressed to prevent terminate)"
-                              << std::endl;
                 } catch (...) {
-                    std::cerr << "chainbase: session undo() threw unknown exception "
-                              << "in destructor (suppressed to prevent terminate)"
-                              << std::endl;
+                    detail::report_failed_session_undo();
                 }
             }
 
@@ -948,10 +955,18 @@ namespace chainbase {
             }
 
             void undo() {
+                std::exception_ptr failure;
                 for (auto& i : _index_sessions) {
-                    i->undo();
+                    try {
+                        i->undo();
+                    } catch (...) {
+                        if (!failure) failure = std::current_exception();
+                    }
                 }
                 _index_sessions.clear();
+                // Clean every child, but do not report a failed rollback as
+                // successful to callers using explicit undo().
+                if (failure) std::rethrow_exception(failure);
             }
 
             int64_t revision() const {
