@@ -134,6 +134,28 @@ ChainBase was designed to be used with blockchain applications where an append-o
 to secure state in the event of power loss. This block log can be replayed to regenerate the full database
 state. Dealing with OS crashes, loss of power, and logs, is beyond the scope of ChainBase.
 
+## Undo session failures
+
+Undo sessions must be resolved in last-in, first-out order. A session refuses to
+undo a different revision that remains above its own, including a failed inner
+rollback. A nested `push()` also leaves a newer revision on the stack: resolve
+that revision before undoing the outer session, or use `squash()` to merge it.
+Move operations transfer the index, revision, and rollback ownership.
+
+An undo attempt releases that session's rollback ownership before modifying the
+index. If the attempt throws after partial modification, neither the session nor
+its destructor retries it. Database sessions attempt cleanup of every child;
+explicit `undo()` rethrows the first failure after cleanup. Destructors suppress
+exceptions and emit an incomplete-rollback diagnostic. `squash()` likewise
+releases rollback ownership before attempting a merge; after a failed partial
+merge, the inner revision remains on the stack and outer session cleanup refuses
+it rather than processing the inconsistent history.
+
+A failed rollback does **not** restore a consistent database. The caller must
+stop using the damaged state and recover it from a trusted source. These session
+guards do not make subsequent direct index undo calls safe and do not perform
+snapshot recovery. The mapped database layout is unchanged.
+
 ## Portability 
 
 The contents of the database file is dependent upon the memory layout of the computer and process that created
